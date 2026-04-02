@@ -43,7 +43,7 @@ import websockets
 GAME_SERVER = "ws://localhost:8765/ws/"
 
 # Your bot's display name (shown to all players in the tournament)
-BOT_NAME = "MyBot"
+BOT_NAME = "Yevanz"
 
 # How your bot appears in logs
 BOT_VERSION = "1.0"
@@ -264,15 +264,12 @@ class MyBot:
     def calculate_move(self) -> str | None:
         """Decide which direction to move.
 
-        This is the main function to customize! It's called every game tick
-        with the current game state, and should return one of:
-            "up", "down", "left", "right"
-
-        The default strategy:
-            1. Find all safe moves (not into walls or snakes)
-            2. Prefer moves that lead toward the nearest food
-            3. Prefer moves that leave more escape routes open
-            4. Avoid edges when possible
+        IMPROVED STRATEGY for better winning chances:
+        1. Prioritize capturing food while maintaining safety
+        2. Block opponent from food when beneficial
+        3. Use flood fill to detect trapped positions
+        4. Aggressive positioning and head-on avoidance
+        5. Grow strategically and control the board
 
         Available data:
             self.game_state     - Full game state (see README for format)
@@ -289,27 +286,23 @@ class MyBot:
         if not my_snake or not my_snake.get("body"):
             return None
 
-        head = my_snake["body"][0]              # [x, y] position of our head
+        head = my_snake["body"][0]
+        my_length = len(my_snake["body"])
         current_dir = my_snake.get("direction", "right")
 
-        # Get food items from the game state
+        # Get opponent snake
+        opponent_id = str(3 - int(self.player_id))  # If player 1, opponent is 2, vice versa
+        opponent_snake = snakes.get(opponent_id)
+        opponent_head = opponent_snake["body"][0] if opponent_snake else None
+        opponent_length = len(opponent_snake["body"]) if opponent_snake else 0
+
         foods = self.game_state.get("foods", [])
 
-        # Find the nearest food item
-        nearest_food = None
-        nearest_dist = float('inf')
-        for food in foods:
-            dist = abs(head[0] - food["x"]) + abs(head[1] - food["y"])
-            if dist < nearest_dist:
-                nearest_dist = dist
-                nearest_food = food
-
-        # Build a set of all dangerous positions (occupied by snake bodies).
-        # We exclude tail segments because they'll move away on the next tick.
+        # Build dangerous positions (occupied by snake bodies, excluding tails)
         dangerous = set()
         for snake_data in snakes.values():
             body = snake_data.get("body", [])
-            for segment in body[:-1]:           # Skip the tail (last segment)
+            for segment in body[:-1]:
                 dangerous.add((segment[0], segment[1]))
 
         # Direction vectors
@@ -320,24 +313,34 @@ class MyBot:
             "right": (1, 0)
         }
 
-        # Can't reverse direction (e.g. can't go left if currently going right)
         opposites = {"up": "down", "down": "up", "left": "right", "right": "left"}
 
         def is_safe(x, y):
-            """Check if a position is safe to move into."""
+            """Check if position is safe."""
             if x < 0 or x >= self.grid_width or y < 0 or y >= self.grid_height:
                 return False
             return (x, y) not in dangerous
 
-        def count_escape_routes(x, y):
-            """Count how many safe moves are available from a position (0-4)."""
-            count = 0
-            for dx, dy in directions.values():
-                if is_safe(x + dx, y + dy):
-                    count += 1
-            return count
+        def flood_fill_size(x, y, exclude_pos=None):
+            """Use flood fill to count reachable safe spaces from position."""
+            visited = set()
+            queue = [(x, y)]
+            visited.add((x, y))
+            
+            if not is_safe(x, y):
+                return 0
+            
+            while queue and len(visited) < 100:  # Limit to avoid slowness
+                cx, cy = queue.pop(0)
+                for dx, dy in directions.values():
+                    nx, ny = cx + dx, cy + dy
+                    if (nx, ny) not in visited and is_safe(nx, ny):
+                        visited.add((nx, ny))
+                        queue.append((nx, ny))
+            
+            return len(visited)
 
-        # Find all safe (non-wall, non-snake, non-reversing) moves
+        # Find all safe moves
         safe_moves = []
         for direction, (dx, dy) in directions.items():
             if direction == opposites.get(current_dir):
@@ -347,18 +350,14 @@ class MyBot:
             if is_safe(new_x, new_y):
                 safe_moves.append({"direction": direction, "x": new_x, "y": new_y})
 
-        # If no safe moves exist, just pick any non-reversing move
+        # If no safe moves, take any non-reversing move to delay death
         if not safe_moves:
             for direction in directions:
                 if direction != opposites.get(current_dir):
                     return direction
             return current_dir
 
-        # ==================================================================
-        #  SCORING - This is where you decide how "good" each move is.
-        #  Higher score = better move. Adjust the weights to change behavior.
-        # ==================================================================
-
+        # Score each move
         best_dir = None
         best_score = float('-inf')
 
@@ -366,27 +365,52 @@ class MyBot:
             score = 0
             new_x, new_y = move["x"], move["y"]
 
-            # --- Food bonus: big reward for landing directly on food ---
+            # Priority 1: CAPTURE FOOD (massive bonus)
+            food_on_tile = False
             for food in foods:
                 if new_x == food["x"] and new_y == food["y"]:
-                    score += 1000
+                    score += 5000
+                    food_on_tile = True
                     break
 
-            # --- Distance to food: prefer moves that get closer ---
-            if nearest_food:
-                food_dist = abs(new_x - nearest_food["x"]) + abs(new_y - nearest_food["y"])
-                score += (self.grid_width + self.grid_height - food_dist) * 10
+            # Priority 2: FIND NEAREST REACHABLE FOOD
+            if not food_on_tile and foods:
+                min_food_dist = float('inf')
+                for food in foods:
+                    dist = abs(new_x - food["x"]) + abs(new_y - food["y"])
+                    if dist < min_food_dist:
+                        min_food_dist = dist
+                
+                # Strong incentive to move toward food
+                score += max(0, (50 - min_food_dist) * 100)
 
-            # --- Escape routes: prefer moves that don't trap us ---
-            escape_routes = count_escape_routes(new_x, new_y)
-            score += escape_routes * 50
+            # Priority 3: SAFETY - Flood fill to detect traps
+            reachable = flood_fill_size(new_x, new_y)
+            score += reachable * 30  # Large penalty for moves into tight spaces
 
-            # --- Edge avoidance: small bonus for staying away from walls ---
+            # Priority 4: OPPONENT BLOCKING (if stronger, block them)
+            if opponent_head and my_length >= opponent_length - 1:
+                opponent_dist = abs(new_x - opponent_head[0]) + abs(new_y - opponent_head[1])
+                if opponent_dist < 6:  # Keep pressure when close
+                    score += (6 - opponent_dist) * 50
+
+            # Priority 5: AVOID HEAD-ON COLLISION
+            if opponent_head:
+                if new_x == opponent_head[0] and new_y == opponent_head[1]:
+                    score -= 5000  # Never move into opponent's head
+
+            # Priority 6: CENTER CONTROL (small bonus for mid-board positioning)
+            center_x, center_y = self.grid_width // 2, self.grid_height // 2
+            center_dist = abs(new_x - center_x) + abs(new_y - center_y)
+            if my_length > opponent_length:
+                score += (30 - center_dist) * 20  # Control center when winning
+
+            # Priority 7: EDGE AVOIDANCE (slight penalty)
             edge_dist = min(new_x, self.grid_width - 1 - new_x,
                            new_y, self.grid_height - 1 - new_y)
-            score += edge_dist * 5
+            if edge_dist <= 1:
+                score -= 200
 
-            # --- Update best move ---
             if score > best_score:
                 best_score = score
                 best_dir = move["direction"]
