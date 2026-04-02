@@ -357,7 +357,7 @@ class MyBot:
                     return direction
             return current_dir
 
-        # Score each move
+        # Score each move - OPTIMIZED FOR LONGEST SNAKE WINS
         best_dir = None
         best_score = float('-inf')
 
@@ -365,51 +365,80 @@ class MyBot:
             score = 0
             new_x, new_y = move["x"], move["y"]
 
-            # Priority 1: CAPTURE FOOD (massive bonus)
+            # ========== PRIORITY 1: CAPTURE FOOD (THE GOAL!) ==========
             food_on_tile = False
+            closest_food = None
+            closest_food_dist = float('inf')
+            
             for food in foods:
                 if new_x == food["x"] and new_y == food["y"]:
-                    score += 5000
+                    score += 10000  # HUGE bonus for direct food capture
                     food_on_tile = True
-                    break
-
-            # Priority 2: FIND NEAREST REACHABLE FOOD
-            if not food_on_tile and foods:
-                min_food_dist = float('inf')
-                for food in foods:
+                else:
+                    # Track closest food distance
                     dist = abs(new_x - food["x"]) + abs(new_y - food["y"])
-                    if dist < min_food_dist:
-                        min_food_dist = dist
+                    if dist < closest_food_dist:
+                        closest_food_dist = dist
+                        closest_food = food
+
+            # ========== PRIORITY 2: AGGRESSIVE FOOD PURSUIT ==========
+            if not food_on_tile and closest_food:
+                # Extra aggressive food pursuit - this is how you win!
+                remaining_distance = closest_food_dist
+                if remaining_distance <= 2:
+                    score += 3000  # Very close to food
+                elif remaining_distance <= 5:
+                    score += 1500  # Getting closer
+                else:
+                    score += (100 - remaining_distance) * 30  # Long distance pursuit
                 
-                # Strong incentive to move toward food
-                score += max(0, (50 - min_food_dist) * 100)
+                # Prefer moves that reduce distance to food
+                direct_dist_from_head = abs(head[0] - closest_food["x"]) + abs(head[1] - closest_food["y"])
+                distance_improved = direct_dist_from_head - remaining_distance
+                if distance_improved > 0:
+                    score += distance_improved * 500  # VERY high bonus for getting closer
 
-            # Priority 3: SAFETY - Flood fill to detect traps
+            # ========== PRIORITY 3: SAFETY - BUT TAKE RISKS FOR FOOD ==========
             reachable = flood_fill_size(new_x, new_y)
-            score += reachable * 30  # Large penalty for moves into tight spaces
+            # Only heavily penalize tight spaces if we're NOT chasing food
+            if closest_food and closest_food_dist <= 3:
+                # When chasing close food, accept smaller spaces
+                score += reachable * 5
+            else:
+                # When not chasing food, prioritize space
+                score += reachable * 20
 
-            # Priority 4: OPPONENT BLOCKING (if stronger, block them)
-            if opponent_head and my_length >= opponent_length - 1:
-                opponent_dist = abs(new_x - opponent_head[0]) + abs(new_y - opponent_head[1])
-                if opponent_dist < 6:  # Keep pressure when close
-                    score += (6 - opponent_dist) * 50
+            # ========== PRIORITY 4: BLOCK OPPONENT FROM FOOD ==========
+            if opponent_head and foods:
+                # Block opponent from reaching closer food than us
+                for food in foods:
+                    opponent_dist = abs(opponent_head[0] - food["x"]) + abs(opponent_head[1] - food["y"])
+                    our_dist = abs(new_x - food["x"]) + abs(new_y - food["y"])
+                    if our_dist < opponent_dist and opponent_dist < 5:
+                        score += (5 - opponent_dist) * 200  # Block them!
 
-            # Priority 5: AVOID HEAD-ON COLLISION
+            # ========== PRIORITY 5: AVOID HEAD-ON COLLISION ==========
             if opponent_head:
                 if new_x == opponent_head[0] and new_y == opponent_head[1]:
-                    score -= 5000  # Never move into opponent's head
+                    score -= 10000  # Never crash into opponent
 
-            # Priority 6: CENTER CONTROL (small bonus for mid-board positioning)
-            center_x, center_y = self.grid_width // 2, self.grid_height // 2
-            center_dist = abs(new_x - center_x) + abs(new_y - center_y)
-            if my_length > opponent_length:
-                score += (30 - center_dist) * 20  # Control center when winning
+            # ========== PRIORITY 6: AVOID OPPONENT BODY ==========
+            for snake_data in snakes.values():
+                snake_id = int(list(snakes.keys())[list(snakes.values()).index(snake_data)])
+                if snake_id != self.player_id:
+                    body = snake_data.get("body", [])
+                    for i, segment in enumerate(body):
+                        if new_x == segment[0] and new_y == segment[1]:
+                            if i > len(my_snake["body"]) / 2:  # Only avoid if it's substantial
+                                score -= 2000
 
-            # Priority 7: EDGE AVOIDANCE (slight penalty)
+            # ========== PRIORITY 7: MAINTAIN SPACE ==========
             edge_dist = min(new_x, self.grid_width - 1 - new_x,
                            new_y, self.grid_height - 1 - new_y)
-            if edge_dist <= 1:
-                score -= 200
+            if edge_dist > 2:
+                score += edge_dist * 5  # Small bonus for not being at edges
+            elif edge_dist == 0:
+                score -= 500  # Slight penalty for extreme edges
 
             if score > best_score:
                 best_score = score
